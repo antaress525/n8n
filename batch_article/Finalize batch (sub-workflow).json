@@ -1,0 +1,334 @@
+{
+  "name": "Finalize batch (sub-workflow)",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT t.id, t.batch_id, t.row_index, t.theme, t.status, t.error_message, r.content, b.file_name\nFROM tasks t\nLEFT JOIN responses r ON r.task_id = t.id\nJOIN batchs b ON b.id = t.batch_id\nWHERE t.batch_id = {{ Number($json.batch_id) }}\nORDER BY t.row_index;",
+        "options": {}
+      },
+      "id": "b712f88b-9475-460a-b904-674d7173ea9f",
+      "name": "Get Batch Articles",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        -1664,
+        -224
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "postgres": {
+          "id": "Dnflnp0fa01fy1z9",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const batchId = $('Check Batch Completion').first().json.batch_id;\n\n// Le lot est garanti complet par le node IF : toutes les lignes sont exploitables\nconst rows = $('Get Batch Articles').all().map((i) => i.json);\n\nconst baseName = String(rows[0]?.file_name ?? '').replace(/\\.[^./\\\\]+$/, '');\nconst safeName =\n  baseName.replace(/[^\\p{L}\\p{N}._-]+/gu, '_').replace(/^[._]+|_+$/g, '') ||\n  'batch-' + batchId;\n\nconst PAGE_BREAK = '```{=openxml}\\n<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\\n```';\n\n// Bloc d'une seule ligne, courte, sans ponctuation finale = intertitre\nconst isHeading = (b) => !b.includes('\\n') && b.length < 150 && !/[.!?:;,]$/.test(b);\n\nconst articles = rows.map((r) => {\n  const text = String(r.content).replace(/\\r\\n/g, '\\n').trim();\n  const [first, ...restLines] = text.split('\\n');\n  const title = (first || r.theme || '').trim();\n\n  const out = ['# ' + title, ''];\n  const blocks = restLines.join('\\n').split(/\\n{2,}/).map((b) => b.trim()).filter(Boolean);\n  for (const b of blocks) {\n    out.push(isHeading(b) ? '## ' + b : b.replace(/\\n/g, ' '));\n    out.push('');\n  }\n  return out.join('\\n');\n});\n\nconst markdown = articles.join('\\n' + PAGE_BREAK + '\\n\\n');\n\nreturn [{\n  json: {\n    batch_id: batchId,\n    safe_name: safeName,\n    md_path: '/files/output/batch-' + batchId + '.md',\n    docx_path: '/files/output/' + safeName + '.docx',\n  },\n  binary: {\n    data: {\n      data: Buffer.from(markdown, 'utf8').toString('base64'),\n      mimeType: 'text/markdown',\n      fileName: 'batch-' + batchId + '.md',\n    },\n  },\n}];"
+      },
+      "id": "7022ba71-6c14-43c6-8fe3-221b5e8bc0bf",
+      "name": "Build Markdown",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1008,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $('Build Markdown').first().json.docx_path }}",
+        "options": {}
+      },
+      "name": "Read DOCX",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -432,
+        -240
+      ],
+      "id": "e1195c15-16d5-49e0-8d8b-b12e19d8125a"
+    },
+    {
+      "parameters": {
+        "command": "=pandoc \"{{ $('Build Markdown').first().json.md_path }}\" -f markdown -t docx -o \"{{ $('Build Markdown').first().json.docx_path }}\" && rm \"{{ $('Build Markdown').first().json.md_path }}\""
+      },
+      "name": "Run Pandoc",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -624,
+        -240
+      ],
+      "id": "e7902352-6590-4844-b2b7-d2bfe46f85c0"
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "={{ $json.md_path }}",
+        "options": {}
+      },
+      "name": "Write Markdown",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [
+        -816,
+        -240
+      ],
+      "id": "51963d40-3866-4d10-919f-af53d4f405f1"
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "5616704386",
+        "binaryData": true,
+        "additionalFields": {
+          "caption": "=Lot #{{ $('Build Markdown').first().json.batch_id }}"
+        }
+      },
+      "name": "Send to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -448,
+        0
+      ],
+      "id": "058982ed-54e2-46d2-84ca-92d61b2c6ae8",
+      "webhookId": "4491eb88-a7bb-4bf2-a091-f1c43013d5dc",
+      "credentials": {
+        "telegramApi": {
+          "id": "JMcc0anPVTtOCSof",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "=rm -f \"{{ $('Build Markdown').first().json.docx_path }}\" \"{{ $('Build Markdown').first().json.md_path }}\""
+      },
+      "name": "Cleanup Files",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [
+        -448,
+        288
+      ],
+      "id": "31c193d5-1ba3-42da-a634-8b65bc55e63c"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "batch-complete",
+              "leftValue": "={{ $json.complete }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "All Tasks Done?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1232,
+        -224
+      ],
+      "id": "f3fcdafc-ead1-4cc4-a9a7-733d1a8db573"
+    },
+    {
+      "parameters": {
+        "chatId": "5616704386",
+        "text": "={{ $json.alert_message }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "name": "Notify Incomplete Batch",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -1280,
+        112
+      ],
+      "id": "5450321a-e5e2-44fa-97c7-71f655e900bb",
+      "webhookId": "47ad228e-ba2c-4c46-9512-e0c310850a68",
+      "credentials": {
+        "telegramApi": {
+          "id": "JMcc0anPVTtOCSof",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const batchId = $('When Called').first().json.batch_id;\nconst rows = $input.all().map((i) => i.json).filter((r) => r.id !== undefined);\n\n// Une tâche est terminée seulement si SUCCESS et contenu non vide\nconst isDone = (r) => r.status === 'SUCCESS' && r.content;\nconst done = rows.filter(isDone);\nconst missing = rows.filter((r) => !isDone(r));\nconst complete = rows.length > 0 && missing.length === 0;\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst label = (r) => (r.status === 'QUEUED' ? 'non traitée' : r.status === 'ERROR' ? 'en erreur' : 'réponse vide');\n\n// Message Telegram (HTML), limité pour rester sous les 4096 caractères\nlet alert_message = '';\nif (!complete) {\n  const MAX_LIST = 15;\n  const head =\n    rows.length === 0\n      ? '⚠️ Lot #' + batchId + ' : aucune tâche trouvée en base. Aucun fichier généré.'\n      : '⚠️ Lot #' + batchId + ' incomplet : ' + done.length + '/' + rows.length + ' articles prêts. Aucun fichier généré.';\n  const list = missing.slice(0, MAX_LIST).map((r) => {\n    const err = r.error_message ? ' — ' + esc(String(r.error_message).slice(0, 100)) : '';\n    return '• Ligne ' + r.row_index + ' : ' + esc(String(r.theme).slice(0, 80)) + ' (' + label(r) + ')' + err;\n  });\n  const more = missing.length > MAX_LIST ? '\\n… et ' + (missing.length - MAX_LIST) + ' autre(s).' : '';\n  alert_message =\n    [head, '', ...list].join('\\n') + more + '\\n\\nLes articles réussis restent en base (table responses).';\n}\n\nreturn [{\n  json: {\n    batch_id: batchId,\n    complete,\n    alert_message,\n    stats: {\n      total: rows.length,\n      success: done.length,\n      error: missing.length,\n      failed_tasks: missing.map((f) => ({ id: f.id, theme: f.theme, status: f.status, error: f.error_message })),\n    },\n  },\n}];"
+      },
+      "id": "8d6acf45-1d7f-4b41-939c-17161500e1de",
+      "name": "Check Batch Completion",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1424,
+        -224
+      ]
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "batch_id",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -1936,
+        -224
+      ],
+      "id": "8dafa502-203b-4e43-9a90-4973fb440f81",
+      "name": "When Called"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Get Batch Articles": {
+      "main": [
+        [
+          {
+            "node": "Check Batch Completion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Markdown": {
+      "main": [
+        [
+          {
+            "node": "Write Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read DOCX": {
+      "main": [
+        [
+          {
+            "node": "Send to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Pandoc": {
+      "main": [
+        [
+          {
+            "node": "Read DOCX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Markdown": {
+      "main": [
+        [
+          {
+            "node": "Run Pandoc",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Telegram": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All Tasks Done?": {
+      "main": [
+        [
+          {
+            "node": "Build Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify Incomplete Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Batch Completion": {
+      "main": [
+        [
+          {
+            "node": "All Tasks Done?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Get Batch Articles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "2c79ca98-6aba-4d44-b1be-ae9a77965a37",
+  "meta": {
+    "instanceId": "e0d0d08b3f0e7e6dadc6dc0c1580ca685d85d0e67806c9db5307466cadc3c770"
+  },
+  "nodeGroups": [],
+  "id": "fqQPANLAVD8JF74G",
+  "tags": []
+}

@@ -1,0 +1,288 @@
+{
+  "name": "Batch retry",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Article Retry",
+        "formDescription": "Rejoue les tâches non réussies d'un lot, puis relance la finalisation (Word + Telegram).",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Numéro du lot",
+              "fieldType": "number",
+              "fieldName": "batch_id",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "path": "article-retry"
+        }
+      },
+      "id": "1ad8f49d-e130-40a8-9fb1-1d5adba823c2",
+      "name": "Retry Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        768,
+        48
+      ],
+      "webhookId": "9fc81597-497e-4134-a491-aee30b5da3b4"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH reset AS (\n  UPDATE tasks\n  SET status = 'QUEUED', error_message = NULL, updated_at = now()\n  WHERE batch_id = $1::bigint\n    AND status IN ('ERROR', 'QUEUED')\n  RETURNING id, batch_id, theme, retry_count, row_index\n)\nSELECT r.id, r.theme, r.retry_count, b.prompt_template\nFROM reset r\nJOIN batchs b ON b.id = r.batch_id\nORDER BY r.row_index;",
+        "options": {
+          "queryReplacement": "={{ $json.batch_id }}"
+        }
+      },
+      "id": "75bc4aa8-0489-4f27-992c-cddc4b3c814c",
+      "name": "Reset Failed Tasks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        992,
+        48
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "Dnflnp0fa01fy1z9",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-tasks",
+              "leftValue": "={{ $json.id !== undefined }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e932648b-629b-4dc7-b614-2084695877ea",
+      "name": "Has Tasks?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1216,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MuDh1te386utn2Bx",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MuDh1te386utn2Bx",
+          "cachedResultName": "Article Task Runner (sub-workflow)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "task_id": "={{ Number($json.id) }}",
+            "theme": "={{ $json.theme }}",
+            "prompt_template": "={{ $json.prompt_template }}",
+            "retry_count": "={{ Number($json.retry_count || 0) }}"
+          },
+          "schema": [
+            {
+              "id": "task_id",
+              "displayName": "task_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "theme",
+              "displayName": "theme",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "prompt_template",
+              "displayName": "prompt_template",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            }
+          ]
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "7c79c091-9ae5-45c6-827a-7984c16cc5b5",
+      "name": "Process Task",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1472,
+        -64
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "fqQPANLAVD8JF74G",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/fqQPANLAVD8JF74G",
+          "cachedResultName": "Finalize batch (sub-workflow)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "batch_id": "={{ Number($('Retry Form').first().json.batch_id) }}"
+          },
+          "schema": [
+            {
+              "id": "batch_id",
+              "displayName": "batch_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            }
+          ]
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "0a005887-cea2-4620-b120-b502b948a215",
+      "name": "Finalize Batch",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        1728,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## Batch retru\nInput: batch number (form).\n\n1. Queues the ERROR/QUEUED tasks of the batch and retrieves their prompt.\n2. Replay them via Article Task Runner (each mode).\n3. Call Finalize Batch ONCE (once mode): Word + Telegram if complete, notification otherwise.\n\n\"Stainless\" branch: batch already complete or not found, Finalize Batch returns the appropriate file or message.",
+        "height": 684,
+        "width": 1448,
+        "color": 5
+      },
+      "id": "a41dfd1a-a33d-4845-aa69-8709054ffb9b",
+      "name": "Sticky Note Retry",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        592,
+        -352
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Retry Form": {
+      "main": [
+        [
+          {
+            "node": "Reset Failed Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reset Failed Tasks": {
+      "main": [
+        [
+          {
+            "node": "Has Tasks?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Tasks?": {
+      "main": [
+        [
+          {
+            "node": "Process Task",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Finalize Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Task": {
+      "main": [
+        [
+          {
+            "node": "Finalize Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "380d653d-f074-4310-88a7-ac25470a6141",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "e0d0d08b3f0e7e6dadc6dc0c1580ca685d85d0e67806c9db5307466cadc3c770"
+  },
+  "nodeGroups": [],
+  "id": "f538mz21rVsM1Hjb",
+  "tags": []
+}

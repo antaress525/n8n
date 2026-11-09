@@ -1,0 +1,647 @@
+{
+  "name": "Batch article (main)",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Article Generator",
+        "formDescription": "Upload the Word prompt skeleton and the Excel task list. Every row of the first Excel sheet becomes one DeepSeek request.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Prompt Skeleton (Word)",
+              "fieldType": "file",
+              "fieldName": "Prompt_Template",
+              "multipleFiles": false,
+              "acceptFileTypes": ".docx",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Tasks (Excel)",
+              "fieldType": "file",
+              "fieldName": "Tasks_File",
+              "multipleFiles": false,
+              "acceptFileTypes": ".xlsx,.xls",
+              "requiredField": true
+            }
+          ]
+        },
+        "options": {
+          "appendAttribution": false,
+          "path": "article-generator"
+        }
+      },
+      "id": "434b5cf6-84e9-43b7-9025-cd0d28e6bf34",
+      "name": "Batch Submission",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        -192,
+        -384
+      ],
+      "webhookId": "cc5a40f5-ff0e-4012-b45b-9571b2e8f5e8"
+    },
+    {
+      "parameters": {
+        "binaryPropertyName": "Prompt_Template",
+        "outputPrefix": "docx_"
+      },
+      "id": "11248dd8-9193-4307-9906-3ca4ded225c9",
+      "name": "Decompress Word",
+      "type": "n8n-nodes-base.compression",
+      "typeVersion": 1.1,
+      "position": [
+        256,
+        -528
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst binaryKeys = Object.keys(item.binary ?? {});\nif (binaryKeys.length === 0) throw new Error('No decompressed file found in the Word upload.');\n\nlet template = null;\nconst fileName = item.json.word_file_name ?? 'prompt.docx';\n\nfor (const key of binaryKeys) {\n  const buffer = await this.helpers.getBinaryDataBuffer(0, key);\n  const xml = buffer.toString('utf8');\n  if (!xml.includes('<w:document')) continue;\n\n  const body = xml.match(/<w:body>([\\s\\S]*)<\\/w:body>/)?.[1] ?? xml;\n  const withBreaks = body\n    .replace(/<w:tab[^>]*\\/>/g, '\\t')\n    .replace(/<w:br[^>]*\\/>/g, '\\n')\n    .replace(/<\\/w:p>/g, '\\n');\n  const plain = withBreaks.replace(/<[^>]+>/g, '');\n  const decoded = plain\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&quot;/g, String.fromCharCode(34))\n    .replace(/&apos;/g, String.fromCharCode(39))\n    .replace(/&amp;/g, '&');\n\n  template = decoded.replace(/\\n{3,}/g, '\\n\\n').trim();\n  break;\n}\n\nif (!template) throw new Error('word/document.xml was not found in the uploaded .docx file.');\nreturn [{ json: { prompt_template: template, file_name: fileName } }];"
+      },
+      "id": "68e83ef6-2319-4c36-920b-381dccee41d1",
+      "name": "Extract Word Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        -528
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "f5bf0221-5c81-4d64-a43a-4d1d6d8f2e63",
+      "name": "Combine Inputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        704,
+        -384
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "xlsx",
+        "binaryPropertyName": "Tasks_File",
+        "options": {
+          "headerRow": true,
+          "includeEmptyCells": false
+        }
+      },
+      "id": "91682cd1-c84e-4103-8df1-3adb18059138",
+      "name": "Extract Excel Tasks",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1.1,
+      "position": [
+        256,
+        -256
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst templateItem = items.find((item) => typeof item.json.prompt_template === 'string' && item.json.prompt_template.length > 0);\nif (!templateItem) throw new Error('Prompt template extraction failed.');\n\nconst template = templateItem.json.prompt_template;\nconst fileName = templateItem.json.file_name ?? 'prompt.docx';\nconst themeKeyPattern = /theme|thème|sujet|topic|tache|tâche|task/i;\nconst rows = items.filter((item) => item !== templateItem);\n\nconst tasks = [];\nfor (const [index, item] of rows.entries()) {\n  const data = item.json ?? {};\n  const keys = Object.keys(data);\n  const themeKey =\n    keys.find((key) => themeKeyPattern.test(key)) ??\n    keys.find((key) => typeof data[key] === 'string' && data[key].trim().length > 0);\n  const theme = themeKey ? String(data[themeKey] ?? '').trim() : '';\n  if (!theme) continue;\n  tasks.push({ row_index: index + 2, theme });\n}\n\nif (tasks.length === 0) throw new Error('No task found in the Excel file. Check that the first sheet contains a theme column.');\nreturn [{ json: { file_name: fileName, prompt_template: template, tasks } }];"
+      },
+      "id": "01a0974b-680a-422b-b420-ffc0ae11011e",
+      "name": "Build Batch Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "CREATE TABLE IF NOT EXISTS batchs (\n  id BIGSERIAL PRIMARY KEY,\n  file_name VARCHAR(255) NOT NULL,\n  prompt_template TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nCREATE TABLE IF NOT EXISTS tasks (\n  id BIGSERIAL PRIMARY KEY,\n  batch_id BIGINT NOT NULL REFERENCES batchs(id) ON DELETE CASCADE,\n  row_index INTEGER NOT NULL,\n  theme VARCHAR(500) NOT NULL,\n  status VARCHAR(20) NOT NULL DEFAULT 'QUEUED',\n  error_message TEXT,\n  retry_count INTEGER NOT NULL DEFAULT 0,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  CONSTRAINT tasks_status_check CHECK (status IN ('QUEUED', 'SUCCESS', 'ERROR'))\n);\n\nCREATE TABLE IF NOT EXISTS responses (\n  id BIGSERIAL PRIMARY KEY,\n  task_id BIGINT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,\n  content TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nCREATE INDEX IF NOT EXISTS idx_tasks_batch_id ON tasks(batch_id);\nCREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);\n\nALTER TABLE tasks ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0;",
+        "options": {}
+      },
+      "id": "fd7c17c1-9977-4628-84db-f9c1648aad92",
+      "name": "Ensure Database Schema",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1472,
+        80
+      ],
+      "executeOnce": true,
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "Dnflnp0fa01fy1z9",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "batchs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "value": {
+            "file_name": "={{ $('Build Batch Payload').first().json.file_name }}",
+            "prompt_template": "={{ $('Build Batch Payload').first().json.prompt_template }}"
+          },
+          "schema": [
+            {
+              "id": "file_name",
+              "displayName": "file_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "prompt_template",
+              "displayName": "prompt_template",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2fc0c382-4e52-4cee-afc6-ad759caae0f7",
+      "name": "Insert Batch",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        1696,
+        80
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "Dnflnp0fa01fy1z9",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const batch = $input.first().json;\nconst payload = $('Build Batch Payload').first().json;\nreturn payload.tasks.map((task) => ({\n  json: { batch_id: batch.id, row_index: task.row_index, theme: task.theme, status: 'QUEUED' },\n}));"
+      },
+      "id": "b0340d3d-371c-4074-b600-e4012a86d28b",
+      "name": "Prepare Task Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "mode": "list",
+          "value": "tasks"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "value": {
+            "batch_id": "={{ $json.batch_id }}",
+            "row_index": "={{ $json.row_index }}",
+            "theme": "={{ $json.theme }}",
+            "status": "={{ $json.status }}"
+          },
+          "schema": [
+            {
+              "id": "batch_id",
+              "displayName": "batch_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_index",
+              "displayName": "row_index",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "theme",
+              "displayName": "theme",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0ea301e4-709c-4561-91f6-c429d9665b59",
+      "name": "Insert Tasks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2144,
+        80
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "Dnflnp0fa01fy1z9",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "dc87c3d6-c163-4a94-9bc9-1b49b73be528",
+      "name": "Loop Tasks",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2752,
+        -256
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 1. Input\nForm trigger: Word skeleton (.docx) + Excel tasks (.xlsx).",
+        "height": 560,
+        "width": 1320,
+        "color": 4
+      },
+      "id": "aa29634a-c274-4c58-8844-4b8b0928310e",
+      "name": "Sticky Note e056c311",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -320,
+        -656
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 2. Persistence\nCreates the schema if needed, then stores the batch and its tasks with status QUEUED.",
+        "height": 392,
+        "width": 1068,
+        "color": 5
+      },
+      "id": "2284a5c2-a946-4fd7-a36a-57a0e2e84dfa",
+      "name": "Sticky Note 137a04b6",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1216,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## 3. Generation\nDelegated to the **Batch article Runner** sub-workflow: Build Prompt → Call DeepSeek → Normalize → Save Response → Mark Task Success/Error.",
+        "height": 940,
+        "width": 1196,
+        "color": 6
+      },
+      "id": "bc592a87-d8e1-43f6-a906-30194bc79689",
+      "name": "Sticky Note 049e0f43",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2448,
+        -624
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return $input.all().map((item) => {\n  const binary = item.binary ?? {};\n  const word = binary.Prompt_Template;\n  if (!word) return item;\n\n  const originalName = word.fileName ?? 'prompt.docx';\n  const zipName = originalName.replace(/\\.docx$/i, '') + '.zip';\n\n  return {\n    json: { ...item.json, word_file_name: originalName },\n    binary: {\n      ...binary,\n      Prompt_Template: {\n        ...word,\n        fileName: zipName,\n        fileExtension: 'zip',\n        mimeType: 'application/zip',\n      },\n    },\n  };\n});"
+      },
+      "id": "ca9e71cf-2b7b-41dd-a768-30ea09e2b2b4",
+      "name": "Prepare Word Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        32,
+        -528
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "MuDh1te386utn2Bx",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/MuDh1te386utn2Bx",
+          "cachedResultName": "Article Task Runner (sub-workflow)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "task_id": "={{ Number($json.id) }}",
+            "theme": "={{ $json.theme }}",
+            "prompt_template": "={{ $('Build Batch Payload').first().json.prompt_template }}",
+            "retry_count": "={{ Number($json.retry_count || 0) }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "task_id",
+              "displayName": "task_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "theme",
+              "displayName": "theme",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "prompt_template",
+              "displayName": "prompt_template",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": false
+            },
+            {
+              "id": "retry_count",
+              "displayName": "retry_count",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "mode": "each",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "366a5a37-e5bc-421b-8e28-ccf71b9c1f52",
+      "name": "Process Task",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        3008,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "fqQPANLAVD8JF74G",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/fqQPANLAVD8JF74G",
+          "cachedResultName": "Finalize batch (sub-workflow)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "batch_id": "={{ Number($json.batch_id) }}"
+          },
+          "matchingColumns": [
+            "batch_id"
+          ],
+          "schema": [
+            {
+              "id": "batch_id",
+              "displayName": "batch_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "number",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.3,
+      "position": [
+        2992,
+        -416
+      ],
+      "id": "b1127f20-af03-4c57-8147-e313ce92c4f6",
+      "name": "Finalize batch"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Batch Submission": {
+      "main": [
+        [
+          {
+            "node": "Extract Excel Tasks",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Word Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decompress Word": {
+      "main": [
+        [
+          {
+            "node": "Extract Word Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Word Text": {
+      "main": [
+        [
+          {
+            "node": "Combine Inputs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Inputs": {
+      "main": [
+        [
+          {
+            "node": "Build Batch Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Excel Tasks": {
+      "main": [
+        [
+          {
+            "node": "Combine Inputs",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Build Batch Payload": {
+      "main": [
+        [
+          {
+            "node": "Ensure Database Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Database Schema": {
+      "main": [
+        [
+          {
+            "node": "Insert Batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Batch": {
+      "main": [
+        [
+          {
+            "node": "Prepare Task Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Task Rows": {
+      "main": [
+        [
+          {
+            "node": "Insert Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Tasks": {
+      "main": [
+        [
+          {
+            "node": "Finalize batch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Process Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Word Upload": {
+      "main": [
+        [
+          {
+            "node": "Decompress Word",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert Tasks": {
+      "main": [
+        [
+          {
+            "node": "Loop Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Task": {
+      "main": [
+        [
+          {
+            "node": "Loop Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "2094aa93-e098-4911-a31b-2e44a5fef179",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e0d0d08b3f0e7e6dadc6dc0c1580ca685d85d0e67806c9db5307466cadc3c770"
+  },
+  "nodeGroups": [],
+  "id": "ZYcG09ns45OJiOK3",
+  "tags": []
+}
